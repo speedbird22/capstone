@@ -1,52 +1,28 @@
 import streamlit as st
-import requests
+import google.generativeai as genai
 
-# Your API key and Search Engine ID (cx)
-API_KEY = "AIzaSyDdc6sOMuxWKwfNI_DdMNYs_2Jk2bMtTzY"
-SEARCH_ENGINE_ID = "772abe5b13e1f4ff4"
+# Configure the API key
+genai.configure(api_key="AIzaSyDdc6sOMuxWKwfNI_DdMNYs_2Jk2bMtTzY")
 
-def get_recipes(ingredients):
-    # Join ingredients into a single search query
-    query = f"recipes with {', '.join(ingredients)}"
-    url = f"https://www.googleapis.com/customsearch/v1?q={query}&cx={SEARCH_ENGINE_ID}&key={API_KEY}"
+# Set up the model
+model = genai.GenerativeModel("gemini-pro")
 
-    # Call Google Custom Search API
-    response = requests.get(url)
-    if response.status_code != 200:
-        return []
+# Streamlit interface
+st.title("Recipe Suggestion App")
+st.write("Enter your ingredients below, and I'll suggest some recipes you can make!")
 
-    data = response.json()
-    recipes = []
+# Get user input for ingredients
+ingredients = st.text_input("Enter your ingredients (comma-separated):")
 
-    for item in data.get("items", []):
-        recipes.append({
-            "title": item.get("title"),
-            "link": item.get("link"),
-            "snippet": item.get("snippet")
-        })
-
-    return recipes
-
-# Streamlit App UI
-st.set_page_config(page_title="Recipe Finder", page_icon="🍲")
-st.title("🍲 Recipe Finder by Ingredients")
-st.write("Enter the ingredients you have, and get recipe ideas!")
-
-# User input
-ingredients_input = st.text_input("Enter ingredients (comma-separated)", placeholder="e.g. eggs, tomatoes, cheese")
-
-if st.button("Find Recipes"):
-    ingredients = [ing.strip() for ing in ingredients_input.split(",") if ing.strip()]
+# Generate recipe suggestions
+if ingredients:
+    prompt = f"I have these ingredients: {ingredients}. What can I cook with them? Suggest 2 recipes with steps."
     
-    if ingredients:
-        st.subheader("🍽️ Recipes You Can Make")
-        recipes = get_recipes(ingredients)
-        if recipes:
-            for recipe in recipes:
-                st.markdown(f"### [{recipe['title']}]({recipe['link']})")
-                st.write(recipe['snippet'])
-                st.markdown("---")
-        else:
-            st.warning("No recipes found. Try more common ingredients or check your network.")
-    else:
-        st.error("Please enter at least one valid ingredient.")
+    # Generate the response from the API
+    response = model.generate_content(prompt)
+
+    # Display the response
+    st.subheader("Recipe Suggestions:")
+    st.write(response.text)
+else:
+    st.write("Please enter some ingredients to get started.")
