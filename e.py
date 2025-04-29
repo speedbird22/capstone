@@ -1,11 +1,11 @@
 import streamlit as st
 import google.generativeai as genai
 
-# Configure the API key
-genai.configure(api_key="AIzaSyDdc6sOMuxWKwfNI_DdMNYs_2Jk2bMtTzY")
+# Configure the new API key
+genai.configure(api_key="AIzaSyCYcfiDp7bM0dpvJadYxuh4_-yF1ONh2dc")
 
-# Set up the model
-model = genai.GenerativeModel("gemini-pro")
+# Set up the model (using a commonly available model like 'text-bison')
+model = genai.GenerativeModel("text-bison")
 
 # Streamlit interface
 st.title("Recipe Suggestion App")
@@ -18,11 +18,15 @@ ingredients = st.text_input("Enter your ingredients (comma-separated):")
 if ingredients:
     prompt = f"I have these ingredients: {ingredients}. What can I cook with them? Suggest 2 recipes with steps."
     
-    # Generate the response from the API
-    response = model.generate_content(prompt)
+    try:
+        # Generate the response from the API
+        response = model.generate_content(prompt)
 
-    # Display the response
-    st.subheader("Recipe Suggestions:")
-    st.write(response.text)
+        # Display the response
+        st.subheader("Recipe Suggestions:")
+        st.write(response.text)
+    except Exception as e:
+        st.write("Error: Unable to fetch recipe suggestions. Please try again later.")
+        st.write(f"Details: {str(e)}")
 else:
     st.write("Please enter some ingredients to get started.")
