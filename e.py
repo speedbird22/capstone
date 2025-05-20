@@ -7,12 +7,13 @@ import random
 from datetime import datetime
 from dateutil.parser import parse
 import re
+from google.api_core import exceptions
 
 # --- CONFIGURATION ---
-# Gemini API Key (Note: Should ideally be stored in Streamlit secrets for production)
+# Gemini API Key (unchanged as per request)
 genai.configure(api_key="AIzaSyCYcfiDp7bM0dpvJadYxuh4_-yF1ONh2dc")
 
-# Firebase Service Account Key (Embedded)
+# Firebase Service Account Key (unchanged as per request)
 FIREBASE_CREDENTIALS = {
     "type": "service_account",
     "project_id": "restaurant-data-backend",
@@ -33,62 +34,66 @@ st.title("Weekly Menu Generator with Gemini + Firebase")
 try:
     # Firebase Admin Initialization
     try:
-        firebase_admin.get_app()
+        firebase_admin.get_app(name="restaurant-app")
     except ValueError:
         cred = credentials.Certificate(FIREBASE_CREDENTIALS)
-        firebase_admin.initialize_app(cred)
-    db = firestore.client()
+        firebase_admin.initialize_app(cred, name="restaurant-app")
+    db = firestore.client(app=firebase_admin.get_app(name="restaurant-app"))
 
     # Firestore connection test
     try:
-        db.collection("ingredient_inventory").get()
+        db.collection("ingredient_inventory").limit(1).get()
         st.success("✅ Successfully connected to Firestore.")
     except Exception as e:
-        st.error(f"❌ Firestore access error: {e}")
+        st.error(f"❌ Firestore access error: {str(e)}")
         st.stop()
 
     # Initialize Gemini Model
     model = genai.GenerativeModel("gemini-1.5-flash")
 
+    # User input for number of dishes
+    num_dishes = st.number_input("Number of chef specials to generate", min_value=1, max_value=10, value=3)
+
     if st.button("Generate Weekly Chef Specials"):
-        st.info("Fetching ingredients from Firebase and generating chef specials...")
-
-        # Step 1: Pull ingredients from Firestore
-        try:
-            docs = db.collection("ingredient_inventory").stream()
-        except Exception as e:
-            st.error(f"Failed to fetch ingredients from Firestore: {str(e)}")
-            docs = []
-        available_ingredients = []
-        today = datetime.today()
-
-        for doc in docs:
-            data = doc.to_dict()
-            expiry_str = data.get("Expiry Date", "01/01/2100")
-            ingredient_name = data.get("Ingredient", "").strip()
-            if not ingredient_name:
-                continue
+        with st.spinner("Fetching ingredients and generating chef specials..."):
+            # Step 1: Pull ingredients from Firestore
             try:
-                expiry_date = parse(expiry_str, dayfirst=True)
-                if expiry_date > today and ingredient_name not in available_ingredients:
-                    available_ingredients.append(ingredient_name)
-            except (ValueError, TypeError):
-                continue
+                docs = db.collection("ingredient_inventory").stream()
+            except Exception as e:
+                st.error(f"Failed to fetch ingredients from Firestore: {str(e)}")
+                docs = []
+            available_ingredients = []
+            today = datetime.today()
 
-        if len(available_ingredients) < 2:
-            st.warning("Not enough valid ingredients found. Proceeding with available ingredients.")
-        if not available_ingredients:
-            st.error("No valid ingredients found in inventory.")
-            st.stop()
+            for doc in docs:
+                data = doc.to_dict()
+                ingredient_name = data.get("Ingredient", "").strip()
+                expiry_str = data.get("Expiry Date", "01/01/2100")
+                if not ingredient_name or not expiry_str:
+                    st.warning(f"Skipping document {doc.id}: Missing 'Ingredient' or 'Expiry Date'")
+                    continue
+                try:
+                    expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
+                    if expiry_date > today and ingredient_name not in available_ingredients:
+                        available_ingredients.append(ingredient_name)
+                except (ValueError, TypeError) as e:
+                    st.warning(f"Skipping ingredient '{ingredient_name}' due to invalid expiry date: {expiry_str}")
+                    continue
 
-        # Step 2: Generate 3 Chef Special Dishes
-        chef_specials = []
-        required_fields = ["name", "ingredients", "diet", "types", "flavor_profile", "cook_time", "prep_time", "price_usd", "allergens", "description"]
+            if len(available_ingredients) < 4:
+                st.warning(f"Only {len(available_ingredients)} ingredient(s) available. Dishes may be limited.")
+            if not available_ingredients:
+                st.error("No valid ingredients found in inventory. Please add ingredients to Firestore.")
+                st.stop()
 
-        for i in range(3):
-            sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
+            # Step 2: Generate Chef Special Dishes
+            chef_specials = []
+            required_fields = ["name", "ingredients", "diet", "types", "flavor_profile", "cook_time", "prep_time", "price_usd", "allergens", "description"]
 
-            prompt = f"""
+            for i in range(num_dishes):
+                sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
+
+                prompt = f"""
 Using the following ingredients: {', '.join(sample_ings)},
 create a creative dish suitable for a weekly restaurant menu.
 
@@ -108,52 +113,64 @@ Output the recipe in the following JSON format:
 }}
 """
 
-            try:
-                response = model.generate_content(prompt)
-                output = response.text
-
-                # Extract JSON from response
-                json_match = re.search(r'\{.*\}', output, re.DOTALL)
-                if not json_match:
-                    st.error("No valid JSON found in Gemini response.")
+                try:
+                    response = model.generate_content(prompt)
+                    output = response.text
+                except exceptions.RetryError:
+                    st.error(f"Gemini API rate limit exceeded for dish {i+1}. Please try again later.")
                     continue
-                json_text = json_match.group(0)
-                dish = json.loads(json_text)
-                dish['chef_special'] = True
+                except exceptions.GoogleAPIError as e:
+                    st.error(f"Gemini API error for dish {i+1}: {str(e)}")
+                    continue
+
+                # Extract and validate JSON
+                try:
+                    json_match = re.search(r'\{.*\}', output, re.DOTALL)
+                    if not json_match:
+                        st.error(f"No valid JSON found in Gemini response for dish {i+1}.")
+                        continue
+                    json_text = json_match.group(0)
+                    dish = json.loads(json_text)
+                    dish['chef_special'] = True
+                except json.JSONDecodeError as e:
+                    st.error(f"Failed to parse JSON for dish {i+1}: {str(e)}")
+                    continue
 
                 # Validate dish JSON
                 if all(field in dish and dish[field] for field in required_fields):
+                    # Type validation
+                    if not (isinstance(dish["cook_time"], int) and
+                            isinstance(dish["prep_time"], int) and
+                            isinstance(dish["price_usd"], (int, float)) and
+                            isinstance(dish["name"], str)):
+                        st.error(f"Invalid field types in dish: {dish['name']}")
+                        continue
                     # Check for duplicate dish names
-                    existing_dishes = [doc.to_dict().get("name") for doc in db.collection("menu").stream()]
-                    if dish["name"] not in existing_dishes:
-                        db.collection("menu").add(dish)
-                        chef_specials.append(dish)
-                    else:
+                    if db.collection("menu").where("name", "==", dish["name"]).get():
                         st.warning(f"Dish '{dish['name']}' already exists in menu. Skipping.")
+                        continue
+                    # Upload to Firestore
+                    db.collection("menu").add(dish)
+                    chef_specials.append(dish)
                 else:
-                    st.error(f"Invalid dish format: {dish}")
+                    st.error(f"Invalid dish format for dish {i+1}: Missing or empty required fields")
                     continue
 
-            except Exception as e:
-                st.error(f"Failed to generate or upload dish: {str(e)}")
-                continue
-
-        if chef_specials:
-            st.success("Chef specials generated and uploaded successfully!")
-            for d in chef_specials:
-                st.markdown(f"**{d['name']}** - {d['description']}")
-                st.json(d)
-        else:
-            st.error("No chef specials were generated successfully.")
+            if chef_specials:
+                st.success(f"Generated and uploaded {len(chef_specials)} chef specials successfully!")
+                for d in chef_specials:
+                    st.markdown(f"**{d['name']}** - {d['description']}")
+                    st.json(d)
+            else:
+                st.error("No chef specials were generated. Check ingredient inventory or try again.")
 
 except Exception as e:
-    st.error(f"❌ App initialization failed: {e}")
+    st.error(f"❌ App initialization failed: {str(e)}")
 
 # Instructions
 st.markdown("""
 ---
 **What This Does:**
-- Uses embedded Firebase credentials for secure initialization.
 - Pulls current, valid ingredients from Firebase.
 - Uses Gemini to create new chef-special recipes.
 - Validates and uploads each dish to the `menu` collection in Firestore.
