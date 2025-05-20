@@ -4,10 +4,12 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import json
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.parser import parse
 import re
 from google.api_core import exceptions
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # --- CONFIGURATION ---
 # Gemini API Key (unchanged as per request)
@@ -51,49 +53,54 @@ try:
     # Initialize Gemini Model
     model = genai.GenerativeModel("gemini-1.5-flash")
 
-    # User input for number of dishes
-    num_dishes = st.number_input("Number of chef specials to generate", min_value=1, max_value=10, value=3)
+    # Tabs for different functionalities
+    tab1, tab2, tab3 = st.tabs(["Generate Menu", "Weekly Planner", "Menu Dashboard"])
 
-    if st.button("Generate Weekly Chef Specials"):
-        with st.spinner("Fetching ingredients and generating chef specials..."):
-            # Step 1: Pull ingredients from Firestore
-            try:
-                docs = db.collection("ingredient_inventory").stream()
-            except Exception as e:
-                st.error(f"Failed to fetch ingredients from Firestore: {str(e)}")
-                docs = []
-            available_ingredients = []
-            today = datetime.today()
+    # --- TAB 1: Generate Chef Specials ---
+    with tab1:
+        st.header("Generate Weekly Chef Specials")
+        num_dishes = st.number_input("Number of chef specials to generate", min_value=1, max_value=10, value=3)
 
-            for doc in docs:
-                data = doc.to_dict()
-                ingredient_name = data.get("Ingredient", "").strip()
-                expiry_str = data.get("Expiry Date", "01/01/2100")
-                if not ingredient_name or not expiry_str:
-                    st.warning(f"Skipping document {doc.id}: Missing 'Ingredient' or 'Expiry Date'")
-                    continue
+        if st.button("Generate Chef Specials"):
+            with st.spinner("Fetching ingredients and generating chef specials..."):
+                # Step 1: Pull ingredients from Firestore
                 try:
-                    expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
-                    if expiry_date > today and ingredient_name not in available_ingredients:
-                        available_ingredients.append(ingredient_name)
-                except (ValueError, TypeError) as e:
-                    st.warning(f"Skipping ingredient '{ingredient_name}' due to invalid expiry date: {expiry_str}")
-                    continue
+                    docs = db.collection("ingredient_inventory").stream()
+                except Exception as e:
+                    st.error(f"Failed to fetch ingredients from Firestore: {str(e)}")
+                    docs = []
+                available_ingredients = []
+                today = datetime.today()
 
-            if len(available_ingredients) < 4:
-                st.warning(f"Only {len(available_ingredients)} ingredient(s) available. Dishes may be limited.")
-            if not available_ingredients:
-                st.error("No valid ingredients found in inventory. Please add ingredients to Firestore.")
-                st.stop()
+                for doc in docs:
+                    data = doc.to_dict()
+                    ingredient_name = data.get("Ingredient", "").strip()
+                    expiry_str = data.get("Expiry Date", "01/01/2100")
+                    if not ingredient_name or not expiry_str:
+                        st.warning(f"Skipping document {doc.id}: Missing 'Ingredient' or 'Expiry Date'")
+                        continue
+                    try:
+                        expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
+                        if expiry_date > today and ingredient_name not in available_ingredients:
+                            available_ingredients.append(ingredient_name)
+                    except (ValueError, TypeError) as e:
+                        st.warning(f"Skipping ingredient '{ingredient_name}' due to invalid expiry date: {expiry_str}")
+                        continue
 
-            # Step 2: Generate Chef Special Dishes
-            chef_specials = []
-            required_fields = ["name", "ingredients", "diet", "types", "flavor_profile", "cook_time", "prep_time", "price_usd", "allergens", "description"]
+                if len(available_ingredients) < 4:
+                    st.warning(f"Only {len(available_ingredients)} ingredient(s) available. Dishes may be limited.")
+                if not available_ingredients:
+                    st.error("No valid ingredients found in inventory. Please add ingredients to Firestore.")
+                    st.stop()
 
-            for i in range(num_dishes):
-                sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
+                # Step 2: Generate Chef Special Dishes
+                chef_specials = []
+                required_fields = ["name", "ingredients", "diet", "types", "flavor_profile", "cook_time", "prep_time", "price_usd", "allergens", "description"]
 
-                prompt = f"""
+                for i in range(num_dishes):
+                    sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
+
+                    prompt = f"""
 Using the following ingredients: {', '.join(sample_ings)},
 create a creative dish suitable for a weekly restaurant menu.
 
@@ -113,56 +120,129 @@ Output the recipe in the following JSON format:
 }}
 """
 
-                try:
-                    response = model.generate_content(prompt)
-                    output = response.text
-                except exceptions.RetryError:
-                    st.error(f"Gemini API rate limit exceeded for dish {i+1}. Please try again later.")
-                    continue
-                except exceptions.GoogleAPIError as e:
-                    st.error(f"Gemini API error for dish {i+1}: {str(e)}")
-                    continue
+                    try:
+                        response = model.generate_content(prompt)
+                        output = response.text
+                    except exceptions.RetryError:
+                        st.error(f"Gemini API rate limit exceeded for dish {i+1}. Please try again later.")
+                        continue
+                    except exceptions.GoogleAPIError as e:
+                        st.error(f"Gemini API error for dish {i+1}: {str(e)}")
+                        continue
 
-                # Extract and validate JSON
-                try:
-                    json_match = re.search(r'\{.*\}', output, re.DOTALL)
-                    if not json_match:
-                        st.error(f"No valid JSON found in Gemini response for dish {i+1}.")
+                    # Extract and validate JSON
+                    try:
+                        json_match = re.search(r'\{.*\}', output, re.DOTALL)
+                        if not json_match:
+                            st.error(f"No valid JSON found in Gemini response for dish {i+1}.")
+                            continue
+                        json_text = json_match.group(0)
+                        dish = json.loads(json_text)
+                        dish['chef_special'] = True
+                    except json.JSONDecodeError as e:
+                        st.error(f"Failed to parse JSON for dish {i+1}: {str(e)}")
                         continue
-                    json_text = json_match.group(0)
-                    dish = json.loads(json_text)
-                    dish['chef_special'] = True
-                except json.JSONDecodeError as e:
-                    st.error(f"Failed to parse JSON for dish {i+1}: {str(e)}")
-                    continue
 
-                # Validate dish JSON
-                if all(field in dish and dish[field] for field in required_fields):
-                    # Type validation
-                    if not (isinstance(dish["cook_time"], int) and
-                            isinstance(dish["prep_time"], int) and
-                            isinstance(dish["price_usd"], (int, float)) and
-                            isinstance(dish["name"], str)):
-                        st.error(f"Invalid field types in dish: {dish['name']}")
+                    # Validate dish JSON
+                    if all(field in dish and dish[field] for field in required_fields):
+                        # Type validation
+                        if not (isinstance(dish["cook_time"], int) and
+                                isinstance(dish["prep_time"], int) and
+                                isinstance(dish["price_usd"], (int, float)) and
+                                isinstance(dish["name"], str)):
+                            st.error(f"Invalid field types in dish: {dish['name']}")
+                            continue
+                        # Check for duplicate dish names
+                        if db.collection("menu").where("name", "==", dish["name"]).get():
+                            st.warning(f"Dish '{dish['name']}' already exists in menu. Skipping.")
+                            continue
+                        # Upload to Firestore
+                        db.collection("menu").add(dish)
+                        chef_specials.append(dish)
+                    else:
+                        st.error(f"Invalid dish format for dish {i+1}: Missing or empty required fields")
                         continue
-                    # Check for duplicate dish names
-                    if db.collection("menu").where("name", "==", dish["name"]).get():
-                        st.warning(f"Dish '{dish['name']}' already exists in menu. Skipping.")
-                        continue
-                    # Upload to Firestore
-                    db.collection("menu").add(dish)
-                    chef_specials.append(dish)
+
+                if chef_specials:
+                    st.success(f"Generated and uploaded {len(chef_specials)} chef specials successfully!")
+                    for d in chef_specials:
+                        st.markdown(f"**{d['name']}** - {d['description']}")
+                        st.json(d)
                 else:
-                    st.error(f"Invalid dish format for dish {i+1}: Missing or empty required fields")
-                    continue
+                    st.error("No chef specials were generated. Check ingredient inventory or try again.")
 
-            if chef_specials:
-                st.success(f"Generated and uploaded {len(chef_specials)} chef specials successfully!")
-                for d in chef_specials:
-                    st.markdown(f"**{d['name']}** - {d['description']}")
-                    st.json(d)
+    # --- TAB 2: Weekly Planner ---
+    with tab2:
+        st.header("Weekly Planner")
+        days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        selected_day = st.selectbox("Select day to assign chef specials", days_of_week)
+        selected_dishes = st.multiselect("Select chef specials to assign", 
+                                        [doc.to_dict().get("name") for doc in db.collection("menu").where("chef_special", "==", True).stream()])
+
+        if st.button("Assign to Weekly Planner"):
+            with st.spinner(f"Assigning dishes to {selected_day}..."):
+                # Check existing planner entries for the day
+                planner_ref = db.collection("weekly_planner").document(selected_day)
+                existing = planner_ref.get()
+                existing_dishes = existing.to_dict().get("dishes", []) if existing.exists else []
+
+                # Avoid duplicates
+                new_dishes = [dish for dish in selected_dishes if dish not in existing_dishes]
+                if not new_dishes:
+                    st.warning(f"No new dishes to add to {selected_day}.")
+                else:
+                    updated_dishes = existing_dishes + new_dishes
+                    planner_ref.set({"dishes": updated_dishes, "day": selected_day})
+                    st.success(f"Assigned {len(new_dishes)} dishes to {selected_day} successfully!")
+
+        # Display Weekly Planner
+        st.subheader("Current Weekly Planner")
+        for day in days_of_week:
+            planner_doc = db.collection("weekly_planner").document(day).get()
+            if planner_doc.exists:
+                dishes = planner_doc.to_dict().get("dishes", [])
+                st.markdown(f"**{day}**: {', '.join(dishes) if dishes else 'No dishes assigned'}")
             else:
-                st.error("No chef specials were generated. Check ingredient inventory or try again.")
+                st.markdown(f"**{day}**: No dishes assigned")
+
+    # --- TAB 3: Menu Dashboard ---
+    with tab3:
+        st.header("Menu Dashboard")
+        show_only_chef_specials = st.checkbox("Show only chef specials", value=False)
+
+        # Fetch menu items
+        menu_items = []
+        query = db.collection("menu").where("chef_special", "==", True) if show_only_chef_specials else db.collection("menu")
+        for doc in query.stream():
+            dish = doc.to_dict()
+            menu_items.append({
+                "Name": dish.get("name", ""),
+                "Type": dish.get("types", ""),
+                "Diet": dish.get("diet", ""),
+                "Price (USD)": dish.get("price_usd", 0.0),
+                "Cook Time (min)": dish.get("cook_time", 0),
+                "Prep Time (min)": dish.get("prep_time", 0),
+                "Allergens": dish.get("allergens", "")
+            })
+
+        # Display table
+        if menu_items:
+            st.dataframe(pd.DataFrame(menu_items), use_container_width=True)
+        else:
+            st.info("No menu items found.")
+
+        # Visualize dish types
+        if menu_items:
+            type_counts = pd.DataFrame(menu_items)["Type"].value_counts()
+            plt.figure(figsize=(8, 6))
+            type_counts.plot(kind="bar", color="skyblue")
+            plt.title("Distribution of Dish Types")
+            plt.xlabel("Dish Type")
+            plt.ylabel("Count")
+            plt.grid(True)
+            plt.savefig("dish_types.png")
+            st.image("dish_types.png")
+            plt.close()
 
 except Exception as e:
     st.error(f"❌ App initialization failed: {str(e)}")
@@ -174,9 +254,9 @@ st.markdown("""
 - Pulls current, valid ingredients from Firebase.
 - Uses Gemini to create new chef-special recipes.
 - Validates and uploads each dish to the `menu` collection in Firestore.
+- Assigns chef specials to a weekly planner for specific days.
+- Displays a visual dashboard of menu items with filtering and a dish type chart.
 
 **Coming Next:**
-- Weekly planner integration
-- Visual dashboard of menu items
 - Ratings and AI-based dish scoring
 """)
