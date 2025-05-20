@@ -35,7 +35,11 @@ if uploaded_file:
         st.info("Fetching ingredients from Firebase and generating chef specials...")
 
         # Step 1: Pull ingredients from Firestore
-        docs = db.collection("ingredient_inventory").stream()
+        try:
+            docs = db.collection("ingredient_inventory").stream()
+        except Exception as e:
+            st.error(f"Failed to fetch ingredients from Firestore: {str(e)}")
+            docs = []
         available_ingredients = []
         today = datetime.today()
 
