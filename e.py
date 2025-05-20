@@ -26,7 +26,19 @@ if uploaded_file:
     cred = credentials.Certificate(tmp_file_path)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
     db = firestore.client()
+
+    # 🔍 Firestore connection test
+    try:
+        test_docs = db.collection("ingredient_inventory").limit(1).stream()
+        for test_doc in test_docs:
+            st.success("✅ Successfully connected to Firestore.")
+            break
+    except Exception as e:
+        st.error(f"❌ Firestore access error: {e}")
+        st.stop()
 
     # Initialize Gemini Model
     model = genai.GenerativeModel("gemini-1.5-flash")
