@@ -24,7 +24,8 @@ if uploaded_file:
 
     # Firebase Admin Init
     cred = credentials.Certificate(tmp_file_path)
-    firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
     db = firestore.client()
 
     # Initialize Gemini Model
