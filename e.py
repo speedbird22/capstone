@@ -5,7 +5,6 @@ from firebase_admin import credentials, firestore
 import json
 import random
 from datetime import datetime
-import tempfile
 
 # --- CONFIGURATION ---
 # Gemini API Key
@@ -14,18 +13,11 @@ genai.configure(api_key="AIzaSyCYcfiDp7bM0dpvJadYxuh4_-yF1ONh2dc")
 # --- STREAMLIT UI ---
 st.title("Weekly Menu Generator with Gemini + Firebase")
 
-# Upload Firebase Credentials
-uploaded_file = st.file_uploader("Upload Firebase Admin SDK JSON", type="json")
+# Firebase Admin Init from static file path
+FIREBASE_KEY_PATH = "restaurant-data-backend-firebase-adminsdk-fbsvc-bdeb44e4a8.json"
 
-if uploaded_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        tmp_file_path = tmp_file.name
-
-    # Firebase Admin Init
-    cred = credentials.Certificate(tmp_file_path)
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred)
+try:
+    cred = credentials.Certificate(FIREBASE_KEY_PATH)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
@@ -119,11 +111,14 @@ Output the recipe in the following JSON format:
                     st.markdown(f"**{d['name']}** - {d['description']}")
                     st.json(d)
 
+except Exception as e:
+    st.error(f"❌ App initialization failed: {e}")
+
 # Instructions
 st.markdown("""
 ---
 **What This Does:**
-- Prompts you to upload your Firebase Admin SDK credentials.
+- Auto-loads Firebase Admin SDK credentials.
 - Pulls current, valid ingredients from Firebase.
 - Uses Gemini to create new chef-special recipes.
 - Uploads each dish to the `menu` collection in Firestore.
