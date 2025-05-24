@@ -12,10 +12,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # --- CONFIGURATION ---
-# Gemini API Key (unchanged as per request)
+# Gemini API Key
 genai.configure(api_key="AIzaSyCYcfiDp7bM0dpvJadYxuh4_-yF1ONh2dc")
 
-# Firebase Service Account Key (unchanged as per request)
+# Firebase Service Account Key
 FIREBASE_CREDENTIALS = {
     "type": "service_account",
     "project_id": "restaurant-data-backend",
@@ -31,7 +31,7 @@ FIREBASE_CREDENTIALS = {
 }
 
 # --- STREAMLIT UI ---
-st.title("Weekly Menu Generator with Gemini + Firebase")
+st.title("Weekly Menu Generator with Recipe Archive")
 
 try:
     # Firebase Admin Initialization
@@ -54,7 +54,7 @@ try:
     model = genai.GenerativeModel("gemini-1.5-flash")
 
     # Tabs for different functionalities
-    tab1, tab2, tab3 = st.tabs(["Generate Menu", "Weekly Planner", "Menu Dashboard"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Generate Menu", "Weekly Planner", "Menu Dashboard", "Chef Recipe Submission"])
 
     # --- TAB 1: Generate Chef Specials ---
     with tab1:
@@ -139,6 +139,9 @@ Output the recipe in the following JSON format:
                         json_text = json_match.group(0)
                         dish = json.loads(json_text)
                         dish['chef_special'] = True
+                        dish['source'] = 'Gemini'
+                        dish['created_at'] = datetime.now().isoformat()
+                        dish['rating'] = None  # No rating for Gemini-generated dishes
                     except json.JSONDecodeError as e:
                         st.error(f"Failed to parse JSON for dish {i+1}: {str(e)}")
                         continue
@@ -156,22 +159,23 @@ Output the recipe in the following JSON format:
                         if db.collection("menu").where("name", "==", dish["name"]).get():
                             st.warning(f"Dish '{dish['name']}' already exists in menu. Skipping.")
                             continue
-                        # Upload to Firestore
+                        # Upload to Firestore menu and recipe_archive
                         db.collection("menu").add(dish)
+                        db.collection("recipe_archive").add(dish)
                         chef_specials.append(dish)
                     else:
                         st.error(f"Invalid dish format for dish {i+1}: Missing or empty required fields")
                         continue
 
                 if chef_specials:
-                    st.success(f"Generated and uploaded {len(chef_specials)} chef specials successfully!")
+                    st.success(f"Generated and uploaded {len(chef_specials)} chef specials to menu and recipe archive successfully!")
                     for d in chef_specials:
                         st.markdown(f"**{d['name']}** - {d['description']}")
                         st.json(d)
                 else:
                     st.error("No chef specials were generated. Check ingredient inventory or try again.")
 
-    # --- TAB 2: Weekly Planner ---
+    # --- TAB2: Weekly Planner ---
     with tab2:
         st.header("Weekly Planner")
         days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -222,7 +226,8 @@ Output the recipe in the following JSON format:
                 "Price (USD)": dish.get("price_usd", 0.0),
                 "Cook Time (min)": dish.get("cook_time", 0),
                 "Prep Time (min)": dish.get("prep_time", 0),
-                "Allergens": dish.get("allergens", "")
+                "Allergens": dish.get("allergens", ""),
+                "Rating": dish.get("rating", "N/A")
             })
 
         # Display table
@@ -244,6 +249,122 @@ Output the recipe in the following JSON format:
             st.image("dish_types.png")
             plt.close()
 
+    # --- TAB 4: Chef Recipe Submission ---
+    with tab4:
+        st.header("Chef Recipe Submission")
+        
+        # Check if it's time to prompt for weekly submissions
+        last_submission_check = db.collection("config").document("last_submission_check").get()
+        today = datetime.today()
+        should_prompt = False
+
+        if last_submission_check.exists:
+            last_check = parse(last_submission_check.to_dict().get("date", "2000-01-01"))
+            if today >= last_check + timedelta(days=7):
+                should_prompt = True
+        else:
+            should_prompt = True
+
+        if should_prompt:
+            st.info("It's time for chefs to submit their weekly recipes! Please enter your recipe below.")
+            db.collection("config").document("last_submission_check").set({"date": today.isoformat()})
+
+        # Chef recipe input form
+        with st.form("chef_recipe_form"):
+            chef_name = st.text_input("Chef Name")
+            dish_name = st.text_input("Dish Name")
+            ingredients = st.text_area("Ingredients (comma-separated)")
+            diet = st.selectbox("Diet", ["Vegetarian", "Vegan", "Gluten-Free", "Non-Vegetarian", "Other"])
+            dish_type = st.selectbox("Type", ["main", "side", "dessert"])
+            flavor_profile = st.text_input("Flavor Profile")
+            cook_time = st.number_input("Cook Time (minutes)", min_value=1, value=30)
+            prep_time = st.number_input("Prep Time (minutes)", min_value=1, value=15)
+            price_usd = st.number_input("Price (USD)", min_value=0.0, value=10.0, step=0.5)
+            allergens = st.text_input("Allergens (comma-separated)")
+            description = st.text_area("Description")
+            submitted = st.form_submit_button("Submit Recipe")
+
+            if submitted:
+                if not all([chef_name, dish_name, ingredients, diet, dish_type, flavor_profile, cook_time, prep_time, price_usd, allergens, description]):
+                    st.error("All fields are required!")
+                else:
+                    # Prepare dish data
+                    dish = {
+                        "name": dish_name,
+                        "ingredients": ingredients,
+                        "diet": diet,
+                        "types": dish_type,
+                        "flavor_profile": flavor_profile,
+                        "cook_time": int(cook_time),
+                        "prep_time": int(prep_time),
+                        "price_usd": float(price_usd),
+                        "allergens": allergens,
+                        "description": description,
+                        "chef_special": True,
+                        "source": f"Chef {chef_name}",
+                        "created_at": datetime.now().isoformat(),
+                        "rating": None
+                    }
+
+                    # Rate the dish with Gemini
+                    rating_prompt = f"""
+Evaluate the following chef-submitted recipe and provide a rating out of 10 based on creativity, feasibility, and appeal:
+- Name: {dish_name}
+- Ingredients: {ingredients}
+- Diet: {diet}
+- Type: {dish_type}
+- Flavor Profile: {flavor_profile}
+- Description: {description}
+
+Provide a JSON response:
+{{
+  "rating": int,
+  "comment": "..."
+}}
+"""
+                    try:
+                        response = model.generate_content(rating_prompt)
+                        rating_output = response.text
+                        json_match = re.search(r'\{.*\}', rating_output, re.DOTALL)
+                        if json_match:
+                            rating_data = json.loads(json_match.group(0))
+                            dish["rating"] = rating_data.get("rating", 0)
+                            dish["rating_comment"] = rating_data.get("comment", "")
+                        else:
+                            st.warning("Could not parse Gemini rating response. Saving dish without rating.")
+                    except exceptions.GoogleAPIError as e:
+                        st.error(f"Gemini API error while rating dish: {str(e)}")
+                        dish["rating_comment"] = "Rating failed due to API error."
+
+                    # Check for duplicate dish names
+                    if db.collection("menu").where("name", "==", dish["name"]).get():
+                        st.warning(f"Dish '{dish['name']}' already exists in menu. Skipping.")
+                    else:
+                        # Save to menu and recipe_archive
+                        db.collection("menu").add(dish)
+                        db.collection("recipe_archive").add(dish)
+                        st.success(f"Recipe '{dish_name}' submitted and rated successfully! Rating: {dish.get('rating', 'N/A')}")
+                        if dish.get("rating_comment"):
+                            st.markdown(f"**Gemini Comment**: {dish['rating_comment']}")
+
+        # Display archived recipes
+        st.subheader("Recipe Archive")
+        archive_items = []
+        for doc in db.collection("recipe_archive").stream():
+            dish = doc.to_dict()
+            archive_items.append({
+                "Name": dish.get("name", ""),
+                "Source": dish.get("source", ""),
+                "Rating": dish.get("rating", "N/A"),
+                "Type": dish.get("types", ""),
+                "Created At": dish.get("created_at", "")
+            })
+
+        if archive_items:
+            st.dataframe(pd.DataFrame(archive_items), use_container_width=True)
+        else:
+            st.info("No recipes in archive yet.")
+
 except Exception as e:
     st.error(f"❌ App initialization failed: {str(e)}")
 
@@ -252,11 +373,12 @@ st.markdown("""
 ---
 **What This Does:**
 - Pulls current, valid ingredients from Firebase.
-- Uses Gemini to create new chef-special recipes.
-- Validates and uploads each dish to the `menu` collection in Firestore.
+- Uses Gemini to create new chef-special recipes and stores them in both `menu` and `recipe_archive` collections.
+- Allows chefs to submit recipes weekly, which are rated by Gemini and stored in `menu` and `recipe_archive`.
 - Assigns chef specials to a weekly planner for specific days.
 - Displays a visual dashboard of menu items with filtering and a dish type chart.
+- Shows an archive of all recipes with their source and ratings.
 
 **Coming Next:**
-- Ratings and AI-based dish scoring
+- Enhanced AI-based dish scoring with customer feedback integration
 """)
