@@ -82,7 +82,6 @@ try:
                 expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
                 # Parse quantity to extract numeric value
                 try:
-                    # Extract the numeric part from quantity (e.g., "4 kg" -> 4.0)
                     quantity_str = str(quantity).strip()
                     numeric_part = re.match(r'^\d*\.?\d+', quantity_str)
                     quantity_num = float(numeric_part.group(0)) if numeric_part else 0.0
@@ -95,7 +94,8 @@ try:
                         "name": ingredient_name,
                         "expiry_date": expiry_date,
                         "quantity": quantity_num,
-                        "days_to_expiry": (expiry_date - today).days
+                        "days_to_expiry": (expiry_date - today).days,
+                        "expiry_str": expiry_str
                     })
             except (ValueError, TypeError) as e:
                 st.warning(f"Skipping ingredient '{ingredient_name}' due to invalid expiry date: {expiry_str}")
@@ -108,14 +108,19 @@ try:
         # Select top 4 ingredients (close to expiry or high quantity)
         sorted_ingredients = sorted(ingredient_data, key=lambda x: (x["days_to_expiry"], -x["quantity"]))
         top_ingredients = [ing["name"] for ing in sorted_ingredients[:4]]
-        selected_ingredients = st.multiselect(
+        # Create display labels with ingredient name and expiry date
+        ingredient_labels = [f"{ing['name']} (Expires: {ing['expiry_str']})" for ing in sorted_ingredients]
+        label_to_name = {f"{ing['name']} (Expires: {ing['expiry_str']})": ing["name"] for ing in sorted_ingredients}
+        top_ingredient_labels = [f"{ing['name']} (Expires: {ing['expiry_str']})" for ing in sorted_ingredients[:4]]
+        selected_labels = st.multiselect(
             "Select up to 4 priority ingredients (sorted by expiry date and quantity)",
-            available_ingredients,
-            default=top_ingredients[:4],
+            ingredient_labels,
+            default=top_ingredient_labels,
             max_selections=4
         )
+        selected_ingredients = [label_to_name[label] for label in selected_labels]
 
-        # Seasonal ingredients (hard-coded for simplicity; could be dynamic)
+        # Seasonal ingredients (hard-coded for simplicity)
         month = today.month
         seasonal_ingredients = {
             1: ["kale", "brussels sprouts", "citrus fruits"],  # Winter
@@ -138,16 +143,21 @@ try:
                 for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
                     db.collection("weekly_menu").document(day).delete()
 
-                # Generate menu: Special Items, Seasonal Items, Normal Items
-                menu_items = []
+                # Generate a unique menu for each day
+                days_of_week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                weekly_menus = {}
                 required_fields = ["name", "ingredients", "diet", "types", "flavor_profile", "cook_time", "prep_time", "price_usd", "allergens", "description", "category"]
+                used_dish_names = set()  # Track used dish names to avoid duplicates across days
 
-                # Special Items (based on selected ingredients)
-                if selected_ingredients:
-                    for i in range(2):  # Generate 2 special dishes
-                        prompt = f"""
+                for day in days_of_week:
+                    menu_items = []
+
+                    # Special Items (based on selected ingredients)
+                    if selected_ingredients:
+                        for i in range(2):  # Generate 2 special dishes
+                            prompt = f"""
 Using the following priority ingredients: {', '.join(selected_ingredients)},
-create a creative dish suitable for a weekly restaurant menu.
+create a creative dish suitable for a weekly restaurant menu for {day}.
 
 Output the recipe in the following JSON format:
 {{
@@ -164,35 +174,36 @@ Output the recipe in the following JSON format:
   "category": "Special Items"
 }}
 """
-                        try:
-                            response = model.generate_content(prompt)
-                            output = response.text
-                            json_match = re.search(r'\{.*\}', output, re.DOTALL)
-                            if not json_match:
-                                st.error(f"No valid JSON found for special dish {i+1}.")
-                                continue
-                            dish = json.loads(json_match.group(0))
-                            dish['category'] = "Special Items"
-                            dish['source'] = 'Gemini'
-                            dish['created_at'] = datetime.now().isoformat()
-                            dish['rating'] = None
-                            if all(field in dish and dish[field] for field in required_fields):
-                                if db.collection("menu").where("name", "==", dish["name"]).get():
-                                    st.warning(f"Dish '{dish['name']}' already exists. Skipping.")
+                            try:
+                                response = model.generate_content(prompt)
+                                output = response.text
+                                json_match = re.search(r'\{.*\}', output, re.DOTALL)
+                                if not json_match:
+                                    st.error(f"No valid JSON found for special dish {i+1} on {day}.")
                                     continue
-                                db.collection("menu").add(dish)
-                                db.collection("recipe_archive").add(dish)
-                                menu_items.append(dish)
-                        except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
-                            st.error(f"Error generating special dish {i+1}: {str(e)}")
-                            continue
+                                dish = json.loads(json_match.group(0))
+                                dish['category'] = "Special Items"
+                                dish['source'] = 'Gemini'
+                                dish['created_at'] = datetime.now().isoformat()
+                                dish['rating'] = None
+                                if all(field in dish and dish[field] for field in required_fields):
+                                    if dish["name"] in used_dish_names or db.collection("menu").where("name", "==", dish["name"]).get():
+                                        st.warning(f"Dish '{dish['name']}' already exists for {day}. Skipping.")
+                                        continue
+                                    db.collection("menu").add(dish)
+                                    db.collection("recipe_archive").add(dish)
+                                    menu_items.append(dish)
+                                    used_dish_names.add(dish["name"])
+                            except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
+                                st.error(f"Error generating special dish {i+1} for {day}: {str(e)}")
+                                continue
 
-                # Seasonal Items
-                for i in range(2):  # Generate 2 seasonal dishes
-                    sample_seasonal = random.sample(seasonal_ingredients, min(2, len(seasonal_ingredients)))
-                    prompt = f"""
+                    # Seasonal Items
+                    for i in range(2):  # Generate 2 seasonal dishes
+                        sample_seasonal = random.sample(seasonal_ingredients, min(2, len(seasonal_ingredients)))
+                        prompt = f"""
 Using the following seasonal ingredients: {', '.join(sample_seasonal)},
-create a creative dish suitable for a weekly restaurant menu.
+create a creative dish suitable for a weekly restaurant menu for {day}.
 
 Output the recipe in the following JSON format:
 {{
@@ -209,35 +220,36 @@ Output the recipe in the following JSON format:
   "category": "Seasonal Items"
 }}
 """
-                    try:
-                        response = model.generate_content(prompt)
-                        output = response.text
-                        json_match = re.search(r'\{.*\}', output, re.DOTALL)
-                        if not json_match:
-                            st.error(f"No valid JSON found for seasonal dish {i+1}.")
-                            continue
-                        dish = json.loads(json_match.group(0))
-                        dish['category'] = "Seasonal Items"
-                        dish['source'] = 'Gemini'
-                        dish['created_at'] = datetime.now().isoformat()
-                        dish['rating'] = None
-                        if all(field in dish and dish[field] for field in required_fields):
-                            if db.collection("menu").where("name", "==", dish["name"]).get():
-                                st.warning(f"Dish '{dish['name']}' already exists. Skipping.")
+                        try:
+                            response = model.generate_content(prompt)
+                            output = response.text
+                            json_match = re.search(r'\{.*\}', output, re.DOTALL)
+                            if not json_match:
+                                st.error(f"No valid JSON found for seasonal dish {i+1} on {day}.")
                                 continue
-                            db.collection("menu").add(dish)
-                            db.collection("recipe_archive").add(dish)
-                            menu_items.append(dish)
-                    except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
-                        st.error(f"Error generating seasonal dish {i+1}: {str(e)}")
-                        continue
+                            dish = json.loads(json_match.group(0))
+                            dish['category'] = "Seasonal Items"
+                            dish['source'] = 'Gemini'
+                            dish['created_at'] = datetime.now().isoformat()
+                            dish['rating'] = None
+                            if all(field in dish and dish[field] for field in required_fields):
+                                if dish["name"] in used_dish_names or db.collection("menu").where("name", "==", dish["name"]).get():
+                                    st.warning(f"Dish '{dish['name']}' already exists for {day}. Skipping.")
+                                    continue
+                                db.collection("menu").add(dish)
+                                db.collection("recipe_archive").add(dish)
+                                menu_items.append(dish)
+                                used_dish_names.add(dish["name"])
+                        except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
+                            st.error(f"Error generating seasonal dish {i+1} for {day}: {str(e)}")
+                            continue
 
-                # Normal Items
-                for i in range(3):  # Generate 3 normal dishes
-                    sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
-                    prompt = f"""
+                    # Normal Items
+                    for i in range(3):  # Generate 3 normal dishes
+                        sample_ings = random.sample(available_ingredients, min(4, len(available_ingredients)))
+                        prompt = f"""
 Using the following ingredients: {', '.join(sample_ings)},
-create a standard dish suitable for a weekly restaurant menu.
+create a standard dish suitable for a weekly restaurant menu for {day}.
 
 Output the recipe in the following JSON format:
 {{
@@ -254,40 +266,46 @@ Output the recipe in the following JSON format:
   "category": "Normal Items"
 }}
 """
-                    try:
-                        response = model.generate_content(prompt)
-                        output = response.text
-                        json_match = re.search(r'\{.*\}', output, re.DOTALL)
-                        if not json_match:
-                            st.error(f"No valid JSON found for normal dish {i+1}.")
-                            continue
-                        dish = json.loads(json_match.group(0))
-                        dish['category'] = "Normal Items"
-                        dish['source'] = 'Gemini'
-                        dish['created_at'] = datetime.now().isoformat()
-                        dish['rating'] = None
-                        if all(field in dish and dish[field] for field in required_fields):
-                            if db.collection("menu").where("name", "==", dish["name"]).get():
-                                st.warning(f"Dish '{dish['name']}' already exists. Skipping.")
+                        try:
+                            response = model.generate_content(prompt)
+                            output = response.text
+                            json_match = re.search(r'\{.*\}', output, re.DOTALL)
+                            if not json_match:
+                                st.error(f"No valid JSON found for normal dish {i+1} on {day}.")
                                 continue
-                            db.collection("menu").add(dish)
-                            db.collection("recipe_archive").add(dish)
-                            menu_items.append(dish)
-                    except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
-                        st.error(f"Error generating normal dish {i+1}: {str(e)}")
-                        continue
+                            dish = json.loads(json_match.group(0))
+                            dish['category'] = "Normal Items"
+                            dish['source'] = 'Gemini'
+                            dish['created_at'] = datetime.now().isoformat()
+                            dish['rating'] = None
+                            if all(field in dish and dish[field] for field in required_fields):
+                                if dish["name"] in used_dish_names or db.collection("menu").where("name", "==", dish["name"]).get():
+                                    st.warning(f"Dish '{dish['name']}' already exists for {day}. Skipping.")
+                                    continue
+                                db.collection("menu").add(dish)
+                                db.collection("recipe_archive").add(dish)
+                                menu_items.append(dish)
+                                used_dish_names.add(dish["name"])
+                        except (exceptions.GoogleAPIError, json.JSONDecodeError) as e:
+                            st.error(f"Error generating normal dish {i+1} for {day}: {str(e)}")
+                            continue
 
-                # Assign menu to all days
-                if menu_items:
-                    for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+                    # Assign menu to the day
+                    if menu_items:
                         db.collection("weekly_menu").document(day).set({
                             "dishes": [dish["name"] for dish in menu_items],
                             "day": day
                         })
-                    st.success(f"Generated weekly menu with {len(menu_items)} dishes and assigned to all days!")
-                    for dish in menu_items:
-                        st.markdown(f"**{dish['name']}** ({dish['category']}) - {dish['description']}")
-                        st.json(dish)
+                        weekly_menus[day] = menu_items
+
+                # Display the generated menus
+                if weekly_menus:
+                    st.success("Generated unique weekly menus for each day!")
+                    for day, menu_items in weekly_menus.items():
+                        st.subheader(f"Menu for {day}")
+                        for dish in menu_items:
+                            st.markdown(f"**{dish['name']}** ({dish['category']}) - {dish['description']}")
+                            st.json(dish)
                 else:
                     st.error("No dishes generated. Check ingredient inventory or try again.")
 
@@ -463,18 +481,3 @@ Provide a JSON response:
 
 except Exception as e:
     st.error(f"❌ App initialization failed: {str(e)}")
-
-# Instructions
-st.markdown("""
----
-**What This Does:**
-- Pulls current, valid ingredients from Firebase and allows selection of up to 4 priority ingredients (sorted by expiry date and quantity).
-- Generates a weekly menu with Special Items (using priority ingredients), Seasonal Items (using seasonal ingredients), and Normal Items, applied to all days.
-- Stores all generated dishes in both `menu` and `recipe_archive` collections with a `category` field (Special Items, Seasonal Items, Normal Items, Chef Special Items).
-- Allows chefs to submit recipes weekly, which are rated by Gemini and stored in `menu` and `recipe_archive` as Chef Special Items.
-- Displays a visual dashboard of menu items with category filtering and a dish category chart.
-- Shows an archive of all recipes with their category, source, and ratings.
-
-**Coming Next:**
-- Enhanced AI-based dish scoring with customer feedback integration
-""")
