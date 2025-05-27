@@ -74,16 +74,19 @@ try:
             data = doc.to_dict()
             ingredient_name = data.get("Ingredient", "").strip()
             expiry_str = data.get("Expiry Date", "01/01/2100")
-            quantity = data.get("Quantity", 0)  # Assuming quantity is stored
+            quantity = data.get("Quantity", 0)  # Quantity might be a string like "4 kg"
             if not ingredient_name or not expiry_str:
                 st.warning(f"Skipping document {doc.id}: Missing 'Ingredient' or 'Expiry Date'")
                 continue
             try:
                 expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
-                # Convert quantity to an integer or float, with a fallback
+                # Parse quantity to extract numeric value
                 try:
-                    quantity_num = float(quantity) if quantity else 0.0
-                except (ValueError, TypeError):
+                    # Extract the numeric part from quantity (e.g., "4 kg" -> 4.0)
+                    quantity_str = str(quantity).strip()
+                    numeric_part = re.match(r'^\d*\.?\d+', quantity_str)
+                    quantity_num = float(numeric_part.group(0)) if numeric_part else 0.0
+                except (ValueError, TypeError, AttributeError):
                     st.warning(f"Invalid quantity for ingredient '{ingredient_name}': {quantity}. Defaulting to 0.")
                     quantity_num = 0.0
                 if expiry_date > today and ingredient_name not in available_ingredients:
