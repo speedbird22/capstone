@@ -80,12 +80,18 @@ try:
                 continue
             try:
                 expiry_date = parse(expiry_str, dayfirst=True, fuzzy=False)
+                # Convert quantity to an integer or float, with a fallback
+                try:
+                    quantity_num = float(quantity) if quantity else 0.0
+                except (ValueError, TypeError):
+                    st.warning(f"Invalid quantity for ingredient '{ingredient_name}': {quantity}. Defaulting to 0.")
+                    quantity_num = 0.0
                 if expiry_date > today and ingredient_name not in available_ingredients:
                     available_ingredients.append(ingredient_name)
                     ingredient_data.append({
                         "name": ingredient_name,
                         "expiry_date": expiry_date,
-                        "quantity": quantity,
+                        "quantity": quantity_num,
                         "days_to_expiry": (expiry_date - today).days
                     })
             except (ValueError, TypeError) as e:
